@@ -1,0 +1,4 @@
+PyMuPDF 
+psycopg2-binary 
+python-dotenv
+ocrmypdf
