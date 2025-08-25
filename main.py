@@ -1,6 +1,7 @@
 import sys 
 from pathlib import Path
 from utils.getTextFromPDF import extract_text_from_pdf
+from utils.textChunker import chunk_text
 
 def print_extraction_results(pages: list[tuple[int, str]], preview_length: int = 300):
     """
@@ -40,3 +41,15 @@ if __name__ == "__main__":
     pages = extract_text_from_pdf(pdf_file_path)
 
     print_extraction_results(pages)
+
+    print("--- Starting Text Chunking ---")
+    text_chunks = chunk_text(pages, chunk_size=400, chunk_overlap=50)
+
+    if text_chunks:
+        print(f"\nSuccessfully created {len(text_chunks)} chunks.")
+        for i, chunk in enumerate(text_chunks):
+            print(f"\n--- Chunk {i+1} ---")
+            print(chunk)
+            print(f"Content: {chunk.content}")
+    else:
+        print("No chunks were created.")
