@@ -2,3 +2,5 @@ PyMuPDF
 psycopg2-binary 
 python-dotenv
 ocrmypdf
+sentence-transformers 
+torch
