@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from utils.getTextFromPDF import extract_text_from_pdf
 from utils.textChunker import chunk_text
+from utils.dbLoader import get_db_connection, load_document_from_file
 
 def print_extraction_results(pages: list[tuple[int, str]], preview_length: int = 300):
     """
@@ -53,3 +54,23 @@ if __name__ == "__main__":
             print(f"Content: {chunk.content}")
     else:
         print("No chunks were created.")
+    
+    
+    # Get a database connection
+    db_connection = get_db_connection()
+
+    if db_connection:
+        print("\n--- Starting Database Load ---")
+        success = load_document_from_file(
+            conn=db_connection,
+            file_path=pdf_file_path,
+            chunks=text_chunks,
+        )
+        if success:
+            print("\n✅ Database load completed successfully.")
+        else:
+            print("\n🔴 Database load failed.")
+        # Close the connection
+        db_connection.close()
+    else:
+        print("🔴 Could not establish database connection.")
