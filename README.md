@@ -17,6 +17,22 @@ This project extracts text from PDFs (with or without OCR), chunks the text, gen
 
 ---
 
+## 📂 Project Structure
+
+```
+.
+├── main.py                # Entry point for the pipeline
+├── requirements.txt       # Python dependencies
+├── .gitignore
+├── init.sql               # SQL schema/init file for Postgres
+├── utils/
+│   ├── dbLoader.py        # Handles DB connection and operations
+│   ├── getTextFromPDF.py  # Extract text from digital PDFs
+│   ├── getTextWithOCR.py  # Extract text from scanned PDFs using OCR
+│   ├── LocalEmbeddingGenerator.py # Generate embeddings locally
+│   └── textChunker.py     # Split text into chunks
+```
+
 ---
 
 ## 🔧 Installation
@@ -64,10 +80,13 @@ docker run -d \
   pgvector/pgvector:pg16
 ```
 
-To verify pgvector is installed:
+### Initialize database schema
+
+Copy and execute the contents of `init.sql` inside the Postgres container:
 
 ```bash
-docker exec -it rag-pg psql -U postgres -d rag_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
+docker cp init.sql rag-pg:/init.sql
+docker exec -it rag-pg psql -U postgres -d rag_db -f //init.sql
 ```
 
 ---
