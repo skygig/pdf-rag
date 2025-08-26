@@ -1,12 +1,13 @@
-# database_loader.py : It connects to the PostgreSQL database and loads document and chunk data.
+# database_loader.py : It connects to the PostgreSQL database and loads document and chunk data with embeddings.
 
 import os
 import hashlib
 import psycopg2
-from psycopg2 import extras # A package for high-performance operations
+from psycopg2 import extras
 from dotenv import load_dotenv
 from typing import List
 from .textChunker import TextChunk 
+from .LocalEmbeddingGenerator import LocalEmbeddingGenerator
 
 def get_db_connection():
     """Establishes and returns a connection to the PostgreSQL database."""
@@ -55,16 +56,18 @@ def load_document_to_db(
     source_hash: str,
     chunks: List[TextChunk],
     file_size: int = None,
-    page_count: int = None
+    page_count: int = None,
+    embedding_model: str = "multi-qa-MiniLM-L6-cos-v1",
+    batch_size: int = 32
 ) -> bool:
     """
-    Loads a document and its text chunks into the database.
+    Loads a document and its text chunks into the database with embedding generation.
 
     This function performs the following steps:
     1. Checks if the document (by its hash) already exists.
     2. If not, it inserts a new record into the `documents` table.
     3. It creates a new record in the `document_versions` table.
-    4. It bulk-inserts all text chunks into the `chunks` table.
+    4. It bulk-inserts all text chunks (with embeddings) into the `chunks` table.
     5. All operations are performed within a single transaction.
 
     Args:
@@ -72,8 +75,10 @@ def load_document_to_db(
         source_uri: The URI or file path of the source document.
         source_hash: The SHA256 hash of the source document.
         chunks: A list of TextChunk objects to be inserted.
-        file_size: Size of the file in bytes (optional).
-        page_count: Number of pages in the document (optional).
+        file_size: Size of the file in bytes.
+        page_count: Number of pages in the document.
+        embedding_model: Name of the embedding model to use.
+        batch_size: Batch size for embedding generation.
 
     Returns:
         True if the loading was successful, False otherwise.
@@ -81,6 +86,15 @@ def load_document_to_db(
     if not chunks:
         print("⚠️ No chunks provided. Nothing to insert.")
         return False
+
+    # Initialize embedding generator if needed
+    embedding_generator = None
+    try:
+        print(f"🔄 Initializing embedding generator with model: {embedding_model}")
+        embedding_generator = LocalEmbeddingGenerator(embedding_model)
+        print(f"✅ Embedding generator ready (dimension: {embedding_generator.embedding_dim})")
+    except Exception as e:
+        print(f"⚠️ Failed to initialize embedding generator: {e}")
 
     try:
         with conn:
@@ -129,14 +143,43 @@ def load_document_to_db(
                     INSERT INTO document_versions (document_id, file_size, page_count, processing_status)
                     VALUES (%s, %s, %s, %s) RETURNING id;
                     """,
-                    (doc_id, file_size or 0, page_count, 'completed')
+                    (doc_id, file_size or 0, page_count, 'processing')
                 )
                 doc_version_id = cur.fetchone()[0]
                 print(f"✅ Created document version ID {doc_version_id}.")
 
-                # 3. Prepare chunk data for bulk insert
+                # 3. Generate embeddings
+                embeddings = []
+                if embedding_generator:
+                    print(f"🔄 Generating embeddings for {len(chunks)} chunks...")
+                    
+                    # Prepare texts for embedding generation
+                    texts_to_embed = []
+                    for chunk in chunks:
+                        # Use text_clean if available, otherwise use text
+                        content_to_embed = getattr(chunk, 'text_clean', None) or chunk.content
+                        texts_to_embed.append(content_to_embed)
+                    
+                    # Generate embeddings in batches
+                    total_batches = (len(texts_to_embed) + batch_size - 1) // batch_size
+                    
+                    for i in range(0, len(texts_to_embed), batch_size):
+                        batch_texts = texts_to_embed[i:i + batch_size]
+                        batch_num = i // batch_size + 1
+                        print(f"🔄 Processing embedding batch {batch_num}/{total_batches}")
+                        
+                        batch_embeddings = embedding_generator.generate_embeddings_batch(batch_texts)
+                        embeddings.extend(batch_embeddings)
+                    
+                    success_count = sum(1 for emb in embeddings if emb is not None)
+                    print(f"✅ Generated {success_count}/{len(chunks)} embeddings successfully")
+                else:
+                    # No embeddings requested, fill with None values
+                    embeddings = [None] * len(chunks)
+
+                # 4. Prepare chunk data for bulk insert
                 chunk_data_tuples = []
-                for chunk_index, chunk in enumerate(chunks):
+                for chunk_index, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                     chunk_hash = calculate_chunk_hash(chunk.content, chunk_index, doc_version_id)
                     char_count = len(chunk.content)
                     
@@ -149,16 +192,17 @@ def load_document_to_db(
                         chunk.page_start,    # page_start
                         chunk.page_end,      # page_end
                         None,                # heading_path (can be added later)
-                        char_count          # char_count
+                        char_count,          # char_count
+                        embedding            # embedding
                     ))
 
-                # 4. Bulk insert chunks
+                # 5. Bulk insert chunks with embeddings
                 extras.execute_values(
                     cur,
                     """
                     INSERT INTO chunks (
                         document_version_id, chunk_index, text, text_clean, 
-                        chunk_hash, page_start, page_end, heading_path, char_count
+                        chunk_hash, page_start, page_end, heading_path, char_count, embedding
                     )
                     VALUES %s;
                     """,
@@ -166,9 +210,11 @@ def load_document_to_db(
                     template=None,
                     page_size=100
                 )
-                print(f"✅ Bulk-inserted {len(chunk_data_tuples)} chunks.")
+                
+                embedded_count = sum(1 for _, _, _, _, _, _, _, _, _, embedding in chunk_data_tuples if embedding is not None)
+                print(f"✅ Bulk-inserted {len(chunk_data_tuples)} chunks ({embedded_count} with embeddings).")
 
-                # 5. Update document version status
+                # 6. Update document version status
                 cur.execute(
                     """
                     UPDATE document_versions 
@@ -177,6 +223,7 @@ def load_document_to_db(
                     """,
                     (doc_version_id,)
                 )
+                print(f"✅ Document processing completed for version ID {doc_version_id}")
 
         return True
 
@@ -191,15 +238,23 @@ def load_document_to_db(
             conn.rollback()
         return False
 
-def load_document_from_file(conn, file_path: str, chunks: List[TextChunk]) -> bool:
+def load_document_from_file(
+    conn, 
+    file_path: str, 
+    chunks: List[TextChunk],
+    embedding_model: str = "multi-qa-MiniLM-L6-cos-v1",
+    batch_size: int = 32
+) -> bool:
     """
-    Convenience function to load a document from a file path.
+    Convenience function to load a document from a file path with embedding generation.
     Automatically calculates file size and hash.
     
     Args:
         conn: Database connection
         file_path: Path to the source file
         chunks: List of TextChunk objects
+        embedding_model: Name of the embedding model to use
+        batch_size: Batch size for embedding generation
         
     Returns:
         True if successful, False otherwise
@@ -221,5 +276,7 @@ def load_document_from_file(conn, file_path: str, chunks: List[TextChunk]) -> bo
         source_hash=file_hash,
         chunks=chunks,
         file_size=file_size,
-        page_count=page_count
+        page_count=page_count,
+        embedding_model=embedding_model,
+        batch_size=batch_size
     )
